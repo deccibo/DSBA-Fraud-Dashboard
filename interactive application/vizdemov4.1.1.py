@@ -89,6 +89,23 @@ VERSION HISTORY
 """
 
 import streamlit as st
+import json, tempfile, os
+
+# ---- Streamlit Cloud → env var bridge ----
+# Promote top-level string secrets to environment variables so the
+# existing os.getenv(...) calls below still work on Streamlit Cloud.
+for _k in ("SUPABASE_URL", "SUPABASE_KEY", "GEMINI_API_KEY",
+           "VERTEX_PROJECT_ID", "VERTEX_API_KEY"):
+    if _k in st.secrets and not os.environ.get(_k):
+        os.environ[_k] = str(st.secrets[_k])
+
+# ---- GCP service account → temp file for Vertex AI ----
+if "gcp_service_account" in st.secrets:
+    _creds = dict(st.secrets["gcp_service_account"])
+    _fd, _path = tempfile.mkstemp(suffix=".json")
+    with os.fdopen(_fd, "w") as _f:
+        json.dump(_creds, _f)
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _path
 import pandas as pd
 import altair as alt
 import plotly.graph_objects as go
