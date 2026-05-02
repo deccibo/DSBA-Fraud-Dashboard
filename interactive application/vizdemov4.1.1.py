@@ -89,23 +89,50 @@ VERSION HISTORY
 """
 
 import streamlit as st
-import json, tempfile, os
+import json
+import os
+import sys
+import tempfile
 
-# ---- Streamlit Cloud → env var bridge ----
+# ---------------------------------------------------------------
+# Streamlit Cloud → env var bridge
+# ---------------------------------------------------------------
 # Promote top-level string secrets to environment variables so the
 # existing os.getenv(...) calls below still work on Streamlit Cloud.
+try:
+    _secret_keys = list(st.secrets.keys()) if hasattr(st.secrets, "keys") else []
+except Exception as _e:
+    _secret_keys = []
+    print(f"[BRIDGE] Could not read st.secrets: {_e}", file=sys.stderr)
+
 for _k in ("SUPABASE_URL", "SUPABASE_KEY", "GEMINI_API_KEY",
            "VERTEX_PROJECT_ID", "VERTEX_API_KEY"):
-    if _k in st.secrets and not os.environ.get(_k):
+    if _k in _secret_keys and not os.environ.get(_k):
         os.environ[_k] = str(st.secrets[_k])
 
-# ---- GCP service account → temp file for Vertex AI ----
-if "gcp_service_account" in st.secrets:
-    _creds = dict(st.secrets["gcp_service_account"])
-    _fd, _path = tempfile.mkstemp(suffix=".json")
-    with os.fdopen(_fd, "w") as _f:
-        json.dump(_creds, _f)
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _path
+# ---------------------------------------------------------------
+# GCP service account → temp file (env-var fallback for any Google lib)
+# ---------------------------------------------------------------
+# We ALSO load credentials directly into vertexai.init() below in get_models(),
+# but writing the env var keeps any other Google client libraries happy.
+GCP_SA_INFO = None
+if "gcp_service_account" in _secret_keys:
+    try:
+        GCP_SA_INFO = dict(st.secrets["gcp_service_account"])
+        _fd, _path = tempfile.mkstemp(suffix=".json")
+        with os.fdopen(_fd, "w") as _f:
+            json.dump(GCP_SA_INFO, _f)
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _path
+        print(f"[BRIDGE] GCP credentials written to {_path}", file=sys.stderr)
+    except Exception as _e:
+        print(f"[BRIDGE] Failed to materialise GCP creds: {_e}", file=sys.stderr)
+else:
+    print(
+        f"[BRIDGE] WARNING: 'gcp_service_account' NOT in st.secrets. "
+        f"Available top-level keys: {_secret_keys}",
+        file=sys.stderr,
+    )
+
 import pandas as pd
 import altair as alt
 import plotly.graph_objects as go
@@ -119,7 +146,6 @@ from vertexai.language_models import TextEmbeddingModel, TextEmbeddingInput
 from vertexai.generative_models import GenerativeModel
 from datetime import datetime, timedelta
 from collections import defaultdict, Counter
-import os
 import traceback
 from html import escape as _esc, unescape as _unesc
 
@@ -734,11 +760,34 @@ def get_models():
           - text-embedding-005 for query embedding in the RAG pipeline
           - gemini-2.5-flash-lite for all generative tasks
 
+        Authentication priority:
+          1. Service-account info loaded from st.secrets["gcp_service_account"]
+             (Streamlit Cloud)
+          2. Application Default Credentials (local dev with `gcloud auth
+             application-default login`)
+
         Returns:
             (emb_model, gen_model) tuple for use throughout the app.
 
     """
-    vertexai.init(project=VERTEX_PROJECT_ID, location="us-central1")
+    init_kwargs = {"project": VERTEX_PROJECT_ID, "location": "us-central1"}
+
+    # Prefer explicit service-account credentials when running on Streamlit Cloud.
+    if GCP_SA_INFO is not None:
+        try:
+            from google.oauth2 import service_account
+            credentials = service_account.Credentials.from_service_account_info(
+                GCP_SA_INFO,
+                scopes=["https://www.googleapis.com/auth/cloud-platform"],
+            )
+            init_kwargs["credentials"] = credentials
+            print("[VERTEX] Initialising with service-account credentials", file=sys.stderr)
+        except Exception as _e:
+            print(f"[VERTEX] Failed to build SA credentials, falling back to ADC: {_e}", file=sys.stderr)
+    else:
+        print("[VERTEX] No SA info; relying on Application Default Credentials", file=sys.stderr)
+
+    vertexai.init(**init_kwargs)
     emb = TextEmbeddingModel.from_pretrained("text-embedding-005")
     gen = GenerativeModel("gemini-2.5-flash-lite")
     return emb, gen
