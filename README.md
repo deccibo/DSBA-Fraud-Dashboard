@@ -3,6 +3,7 @@
 Final capstone project for the MS in Data Science and Business Analytics
 
 Project Members: Owen Williamson, Anders Pierson, Baran Narravula, Declan O'Halloran, and Rituparna Bhattacharya
+
 [Live Demo](https://dsba-fraud-dashboard.streamlit.app/)
 ---
 
